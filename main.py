@@ -7,48 +7,65 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from agents.monitor_agent import MonitorAgent
 from agents.investigation_agent import InvestigationAgent
 from agents.remediation_agent import RemediationAgent
+from agents.escalation_agent import EscalationAgent
+from agents.postmortem_agent import PostMortemAgent
 
 def run_pipeline():
-    print("\n" + "🤖 " * 20)
-    print("AI DEVOPS INCIDENT RESPONSE SYSTEM")
-    print(f"Started at: {datetime.now(timezone.utc)}")
-    print("🤖 " * 20 + "\n")
+    print("\n" + "=" * 60)
+    print("   AI DEVOPS INCIDENT RESPONSE SYSTEM")
+    print("   All 5 Agents Active")
+    print(f"   Started: {datetime.now(timezone.utc)}")
+    print("=" * 60 + "\n")
 
     # STEP 1 — Monitor
-    print("STEP 1: Running Monitor Agent...")
+    print("STEP 1: Monitor Agent checking systems...")
     monitor = MonitorAgent()
     alerts = monitor.run()
 
     if not alerts:
-        print("\n✅ No alerts — all systems healthy!")
+        print("\n✅ All systems healthy — no action needed!")
         return None
 
     # STEP 2 — Investigate
-    print(f"\nSTEP 2: Running Investigation Agent...")
+    print(f"\nSTEP 2: Investigation Agent analyzing {len(alerts)} alert(s)...")
     investigator = InvestigationAgent()
     diagnosis = investigator.investigate(alerts)
 
-    # STEP 3 — Remediate or Escalate
-    print(f"\nSTEP 3: Running Remediation Agent...")
+    # STEP 3 — Remediate
+    print(f"\nSTEP 3: Remediation Agent attempting fix...")
     remediator = RemediationAgent()
-    result = remediator.remediate(diagnosis)
+    remediation = remediator.remediate(diagnosis)
 
-    # STEP 4 — Final Summary
-    print("\n" + "=" * 50)
-    print("📊 FINAL INCIDENT SUMMARY")
-    print("=" * 50)
-    print(f"Alerts Found  : {len(alerts)}")
-    print(f"Root Cause    : {diagnosis['root_cause']}")
-    print(f"Severity      : {diagnosis['severity']}")
-
-    if result.get('status') == 'escalate':
-        print(f"Resolution    : ❌ Escalated to human team")
+    # STEP 4 — Escalate if needed
+    escalation = None
+    if remediation.get('status') == 'escalate':
+        print(f"\nSTEP 4: Escalation Agent notifying team...")
+        escalator = EscalationAgent()
+        escalation = escalator.escalate(diagnosis, alerts)
     else:
-        print(f"Resolution    : ✅ Auto-fixed by Remediation Agent")
-        print(f"Action Taken  : {result.get('message')}")
+        print(f"\nSTEP 4: Skipped — issue was auto-fixed!")
 
-    print("\n🎉 Pipeline complete!")
-    return result
+    # STEP 5 — Post-Mortem
+    print(f"\nSTEP 5: Post-Mortem Agent generating report...")
+    postmortem = PostMortemAgent()
+    report = postmortem.generate(diagnosis, alerts, remediation)
+
+    # FINAL SUMMARY
+    print("\n" + "=" * 60)
+    print("   FINAL INCIDENT SUMMARY")
+    print("=" * 60)
+    print(f"Alerts Detected  : {len(alerts)}")
+    print(f"Root Cause       : {diagnosis['root_cause']}")
+    print(f"Severity         : {diagnosis['severity'].upper()}")
+    print(f"Auto Fixed       : {remediation.get('status') != 'escalate'}")
+    if escalation:
+        print(f"Jira Ticket      : {escalation.get('jira_ticket')}")
+        print(f"Slack Alert      : Sent")
+    print(f"PDF Report       : {report['pdf_path']}")
+    print("\n🎉 ALL 5 AGENTS COMPLETED SUCCESSFULLY!")
+    print("=" * 60)
+
+    return report
 
 
 if __name__ == "__main__":

@@ -11,3 +11,5 @@ __pycache__/
 bin/
 obj/
 *.csproj
+postmortem_*.pdf
+test_*.py

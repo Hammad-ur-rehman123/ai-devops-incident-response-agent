@@ -47,7 +47,7 @@ class EscalationAgent:
 
                 payload = {
                     "fields": {
-                        "project": {"key": "OPS"},
+                        "project": {"key": "KAN"},
                         "summary": summary,
                         "description": description,
                         "issuetype": {"name": "Bug"}

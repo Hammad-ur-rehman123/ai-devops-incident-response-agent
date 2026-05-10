@@ -13,3 +13,6 @@ obj/
 *.csproj
 postmortem_*.pdf
 test_*.py
+package/
+lambda_deployment.zip
+write_handler

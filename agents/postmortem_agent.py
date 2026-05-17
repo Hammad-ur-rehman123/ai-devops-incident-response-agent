@@ -14,7 +14,7 @@ class PostMortemAgent:
 
     def __init__(self):
         self.llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             api_key=os.getenv("GROQ_API_KEY")
         )
 
@@ -34,7 +34,8 @@ class PostMortemAgent:
         print("  Generating PDF...")
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = "postmortem_" + timestamp + ".pdf"
-        filepath = os.path.join('/tmp', filename)
+        import tempfile
+        filepath = os.path.join(os.getcwd(), filename)
         doc = SimpleDocTemplate(filepath, pagesize=letter)
         styles = getSampleStyleSheet()
         story = []

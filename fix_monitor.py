@@ -1,4 +1,4 @@
-import boto3
+content = '''import boto3
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import os
@@ -87,14 +87,19 @@ class MonitorAgent:
                 "message": f"Error count {errors} exceeds threshold {self.error_threshold}"
             })
         if alerts:
-            print(f"\n ALERT(S) DETECTED: {len(alerts)}")
+            print(f"\\n ALERT(S) DETECTED: {len(alerts)}")
             for alert in alerts:
                 print(f"  -> {alert['message']}")
-            print("\nTriggering Investigation Agent...")
+            print("\\nTriggering Investigation Agent...")
         else:
-            print("\n All systems normal.")
+            print("\\n All systems normal.")
         return alerts
 
 if __name__ == "__main__":
     agent = MonitorAgent()
     agent.run()
+'''
+
+with open("agents/monitor_agent.py", "w") as f:
+    f.write(content)
+print("monitor_agent.py fixed successfully!")

@@ -1,22 +1,74 @@
 """
 dashboard.py — AI DevOps Incident Response System
-Flask-Login Authentication + RBAC + Demo Mode
+Flask-Login + RBAC + PostgreSQL/SQLite DB + Search/Filter + CSV Export
 """
 
-from flask import Flask, jsonify, render_template_string, redirect, url_for, request, flash
+from flask import Flask, jsonify, render_template_string, redirect, url_for, request, flash, Response
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_bcrypt import Bcrypt
+from flask_sqlalchemy import SQLAlchemy
 from functools import wraps
 from datetime import datetime
+import csv
+import io
+import os
 
 app = Flask(__name__)
 app.secret_key = "devops-agent-secret-key-change-in-prod"
 
+# ── Database Configuration ────────────────────────────────────────────────────
+# LOCAL DEV:  uses SQLite (no setup needed, file created automatically)
+# PRODUCTION: set DATABASE_URL env var to your RDS PostgreSQL connection string
+#
+# RDS PostgreSQL URL format:
+# postgresql://username:password@your-rds-endpoint.amazonaws.com:5432/dbname
+#
+DATABASE_URL = os.environ.get(
+    'DATABASE_URL',
+    'sqlite:///devops_incidents.db'   # fallback to SQLite for local dev
+)
+# Fix for older SQLAlchemy + Heroku/RDS URLs
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message = "Please log in to access the dashboard."
 
+# ── Database Model ────────────────────────────────────────────────────────────
+class Incident(db.Model):
+    __tablename__ = 'incidents'
+    id            = db.Column(db.Integer, primary_key=True)
+    time          = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    root_cause    = db.Column(db.String(500), nullable=False)
+    severity      = db.Column(db.String(50), nullable=False)
+    jira_ticket   = db.Column(db.String(100))
+    status        = db.Column(db.String(50), default='resolved')
+    triggered_by  = db.Column(db.String(100))
+    service_name  = db.Column(db.String(200))
+
+    def to_dict(self):
+        return {
+            'id':           self.id,
+            'time':         self.time.strftime("%Y-%m-%d %H:%M:%S"),
+            'root_cause':   self.root_cause,
+            'severity':     self.severity,
+            'jira_ticket':  self.jira_ticket or 'N/A',
+            'status':       self.status,
+            'triggered_by': self.triggered_by or 'system',
+            'service_name': self.service_name or 'unknown',
+        }
+
+# Create all tables on startup
+with app.app_context():
+    db.create_all()
+
+# ── User Model ────────────────────────────────────────────────────────────────
 class User(UserMixin):
     def __init__(self, id, username, password_hash, role):
         self.id = id
@@ -43,6 +95,7 @@ def get_user_by_username(username):
 def load_user(user_id):
     return USERS.get(user_id)
 
+# ── Role Decorators ───────────────────────────────────────────────────────────
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -63,8 +116,7 @@ def engineer_required(f):
         return f(*args, **kwargs)
     return decorated
 
-incidents_db = []
-
+# ── HTML: Login ───────────────────────────────────────────────────────────────
 LOGIN_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -146,6 +198,7 @@ LOGIN_HTML = """
 </html>
 """
 
+# ── HTML: Dashboard ───────────────────────────────────────────────────────────
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -211,8 +264,24 @@ DASHBOARD_HTML = """
         .abtn-eng:hover{background:rgba(245,158,11,.25);}
         .abtn-view{background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.3);color:var(--accent);}
         .abtn-view:hover{background:rgba(0,212,255,.18);}
+        .abtn-csv{background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.3);color:#86efac;}
+        .abtn-csv:hover{background:rgba(34,197,94,.25);}
         .abtn-dis{background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--muted);cursor:not-allowed;opacity:.5;}
-        .stitle{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px;}
+        /* Search/Filter Bar */
+        .filter-bar{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:20px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;}
+        .filter-group{display:flex;flex-direction:column;gap:6px;flex:1;min-width:140px;}
+        .filter-label{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
+        .filter-input{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:7px;padding:8px 12px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;outline:none;transition:.2s;}
+        .filter-input:focus{border-color:var(--accent);}
+        .filter-input option{background:var(--card);}
+        .filter-btn{padding:9px 18px;border-radius:7px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;border:none;background:var(--accent);color:#000;transition:.15s;}
+        .filter-btn:hover{opacity:.85;}
+        .filter-clear{padding:9px 14px;border-radius:7px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);transition:.15s;}
+        .filter-clear:hover{color:var(--text);}
+        /* db badge */
+        .db-badge{display:inline-flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#86efac;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);padding:4px 10px;border-radius:6px;}
+        /* Table */
+        .stitle{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:8px;}
         .twrap{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;}
         table{width:100%;border-collapse:collapse;}
         th{background:rgba(255,255,255,.02);font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);padding:12px 18px;text-align:left;}
@@ -221,9 +290,11 @@ DASHBOARD_HTML = """
         .sev-high{background:rgba(239,68,68,.15);color:#fca5a5;padding:3px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;}
         .sev-critical{background:rgba(239,68,68,.25);color:#ef4444;padding:3px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;}
         .sev-medium{background:rgba(96,165,250,.15);color:#93c5fd;padding:3px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;}
+        .sev-low{background:rgba(34,197,94,.1);color:#86efac;padding:3px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;}
         .dot-ok{display:inline-flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-size:12px;}
         .dot-ok::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--success);box-shadow:0 0 6px var(--success);display:inline-block;}
         .empty{text-align:center;padding:36px;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:12px;}
+        .result-count{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:10px;}
     </style>
 </head>
 <body>
@@ -275,11 +346,14 @@ DASHBOARD_HTML = """
       <div class="ptitle">Incident Dashboard</div>
       <div class="psub">AUTONOMOUS DEVOPS RESPONSE SYSTEM - LIVE</div>
     </div>
-    <span class="rbadge rbadge-{{ current_user.role }}">{{ current_user.role }}</span>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <span class="db-badge">&#x1F4BE; DB Connected</span>
+      <span class="rbadge rbadge-{{ current_user.role }}">{{ current_user.role }}</span>
+    </div>
   </div>
 
   <div class="sgrid">
-    <div class="sc"><div class="lbl">Total Incidents</div><div class="num ta" id="total-incidents">0</div><div class="sub">since last restart</div></div>
+    <div class="sc"><div class="lbl">Total Incidents</div><div class="num ta" id="total-incidents">0</div><div class="sub">saved in database</div></div>
     <div class="sc"><div class="lbl">Active Agents</div><div class="num ts">5</div><div class="sub">all operational</div></div>
     <div class="sc"><div class="lbl">Check Interval</div><div class="num tw">60s</div><div class="sub">auto-monitoring</div></div>
     <div class="sc"><div class="lbl">High Severity</div><div class="num td" id="high-count">0</div><div class="sub">critical + high</div></div>
@@ -321,24 +395,58 @@ DASHBOARD_HTML = """
     {% else %}
       <button class="abtn abtn-dis" disabled>Remediation (Engineer+)</button>
     {% endif %}
-    <button class="abtn abtn-view" onclick="loadIncidents()">Refresh Incidents</button>
+    <button class="abtn abtn-view" onclick="loadIncidents()">Refresh</button>
+    <a href="/api/export-csv" class="abtn abtn-csv">Export CSV</a>
   </div>
 
-  <div class="stitle">Incident History</div>
+  <!-- Search & Filter Bar -->
+  <div class="filter-bar">
+    <div class="filter-group">
+      <span class="filter-label">Search</span>
+      <input class="filter-input" type="text" id="search-text" placeholder="root cause, service..."/>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Severity</span>
+      <select class="filter-input" id="filter-severity">
+        <option value="">All</option>
+        <option value="CRITICAL">Critical</option>
+        <option value="HIGH">High</option>
+        <option value="MEDIUM">Medium</option>
+        <option value="LOW">Low</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">From Date</span>
+      <input class="filter-input" type="date" id="filter-date-from"/>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">To Date</span>
+      <input class="filter-input" type="date" id="filter-date-to"/>
+    </div>
+    <button class="filter-btn" onclick="loadIncidents()">Search</button>
+    <button class="filter-clear" onclick="clearFilters()">Clear</button>
+  </div>
+
+  <div class="stitle">
+    <span>Incident History</span>
+    <span class="result-count" id="result-count"></span>
+  </div>
   <div class="twrap">
     <table>
       <thead>
         <tr>
+          <th>#</th>
           <th>Time</th>
           <th>Root Cause</th>
           <th>Severity</th>
           <th>Jira Ticket</th>
+          <th>Service</th>
           <th>Triggered By</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody id="incidents-body">
-        <tr><td colspan="6" class="empty">No incidents yet - click Demo CRITICAL Incident to start!</td></tr>
+        <tr><td colspan="8" class="empty">No incidents yet - click Demo CRITICAL Incident to start!</td></tr>
       </tbody>
     </table>
   </div>
@@ -359,7 +467,7 @@ function runPipeline() {
       } else if (data.status === 'healthy') {
         alert('Pipeline ran! All systems healthy - no incidents detected.');
       } else {
-        alert('Incident handled! Root cause: ' + data.root_cause + ' Severity: ' + data.severity);
+        alert('Incident saved to database! Root cause: ' + data.root_cause);
         loadIncidents();
       }
     })
@@ -383,7 +491,7 @@ function runDemo() {
       if (data.error) {
         alert('Error: ' + data.error);
       } else {
-        alert('ALL 5 AGENTS COMPLETED! Severity: CRITICAL. Root cause: ' + data.incident.root_cause + '. Jira: ' + data.incident.jira_ticket);
+        alert('ALL 5 AGENTS COMPLETED! Saved to database. Severity: CRITICAL. Jira: ' + data.incident.jira_ticket);
         loadIncidents();
       }
     })
@@ -398,30 +506,58 @@ function triggerRemediation() {
   alert('Remediation triggered!');
 }
 
+function clearFilters() {
+  document.getElementById('search-text').value = '';
+  document.getElementById('filter-severity').value = '';
+  document.getElementById('filter-date-from').value = '';
+  document.getElementById('filter-date-to').value = '';
+  loadIncidents();
+}
+
 function loadIncidents() {
-  fetch('/api/incidents')
+  var search   = document.getElementById('search-text').value;
+  var severity = document.getElementById('filter-severity').value;
+  var dateFrom = document.getElementById('filter-date-from').value;
+  var dateTo   = document.getElementById('filter-date-to').value;
+
+  var params = [];
+  if (search)   params.push('search='   + encodeURIComponent(search));
+  if (severity) params.push('severity=' + encodeURIComponent(severity));
+  if (dateFrom) params.push('date_from='+ encodeURIComponent(dateFrom));
+  if (dateTo)   params.push('date_to='  + encodeURIComponent(dateTo));
+
+  var url = '/api/incidents' + (params.length ? '?' + params.join('&') : '');
+
+  fetch(url)
     .then(function(r) { return r.json(); })
-    .then(function(incidents) {
-      document.getElementById('total-incidents').textContent = incidents.length;
+    .then(function(data) {
+      var incidents = data.incidents;
+      var total     = data.total;
+
+      document.getElementById('total-incidents').textContent = total;
       var high = incidents.filter(function(i) {
         return ['high','critical'].indexOf((i.severity || '').toLowerCase()) !== -1;
       }).length;
       document.getElementById('high-count').textContent = high;
+      document.getElementById('result-count').textContent =
+        incidents.length + ' of ' + total + ' incidents shown';
+
       var tbody = document.getElementById('incidents-body');
       if (!incidents.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No incidents yet - click Demo CRITICAL Incident to start!</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">No incidents match your filter.</td></tr>';
         return;
       }
       var rows = '';
-      var reversed = incidents.slice().reverse();
-      for (var i = 0; i < reversed.length; i++) {
-        var inc = reversed[i];
+      for (var i = 0; i < incidents.length; i++) {
+        var inc = incidents[i];
         var sev = (inc.severity || 'medium').toLowerCase();
         rows += '<tr>' +
+          '<td style="color:var(--muted);font-family:monospace;font-size:11px">#' + inc.id + '</td>' +
           '<td style="font-family:monospace;font-size:12px;color:var(--muted)">' + inc.time + '</td>' +
           '<td>' + inc.root_cause + '</td>' +
           '<td><span class="sev-' + sev + '">' + (inc.severity || 'MEDIUM').toUpperCase() + '</span></td>' +
           '<td style="font-family:monospace;font-size:12px">' + (inc.jira_ticket || 'N/A') + '</td>' +
+          '<td style="color:var(--muted);font-size:12px">' + (inc.service_name || 'unknown') + '</td>' +
           '<td style="color:var(--muted);font-size:12px">' + (inc.triggered_by || 'system') + '</td>' +
           '<td><span class="dot-ok">Resolved</span></td>' +
           '</tr>';
@@ -438,6 +574,7 @@ loadIncidents();
 </html>
 """
 
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
     if current_user.is_authenticated:
@@ -471,6 +608,7 @@ def logout():
 def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
+# ── API: Run Pipeline ─────────────────────────────────────────────────────────
 @app.route('/api/run-pipeline', methods=['POST'])
 @admin_required
 def run_pipeline_api():
@@ -508,20 +646,23 @@ def run_pipeline_api():
         postmortem = AgentFactory.create_agent("postmortem")
         postmortem.generate(diagnosis, alerts, result)
 
-        incident = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "root_cause": diagnosis.get('root_cause', 'Unknown'),
-            "severity": diagnosis.get('severity', 'medium'),
-            "jira_ticket": escalation.get('jira_ticket') if escalation else 'Auto-Fixed',
-            "status": "resolved",
-            "triggered_by": current_user.username
-        }
-        incidents_db.append(incident)
-        return jsonify(incident)
+        # ── Save to database ──────────────────────────────────────────────────
+        incident = Incident(
+            root_cause   = diagnosis.get('root_cause', 'Unknown'),
+            severity     = diagnosis.get('severity', 'medium'),
+            jira_ticket  = escalation.get('jira_ticket') if escalation else 'Auto-Fixed',
+            status       = 'resolved',
+            triggered_by = current_user.username,
+            service_name = diagnosis.get('affected_service', 'unknown'),
+        )
+        db.session.add(incident)
+        db.session.commit()
+        return jsonify(incident.to_dict())
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ── API: Demo Incident ────────────────────────────────────────────────────────
 @app.route('/api/demo-incident', methods=['POST'])
 @login_required
 def demo_incident():
@@ -555,37 +696,100 @@ def demo_incident():
         postmortem = AgentFactory.create_agent("postmortem")
         postmortem.generate(diagnosis, alerts, result)
 
-        incident = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "root_cause": diagnosis.get('root_cause', 'High CPU - simulated CRITICAL'),
-            "severity": "CRITICAL",
-            "jira_ticket": escalation.get('jira_ticket', 'DEMO-001') if escalation else 'DEMO-001',
-            "status": "resolved",
-            "triggered_by": current_user.username
-        }
-        incidents_db.append(incident)
-        return jsonify({"success": True, "incident": incident})
+        # ── Save to database ──────────────────────────────────────────────────
+        incident = Incident(
+            root_cause   = diagnosis.get('root_cause', 'High CPU - simulated CRITICAL'),
+            severity     = 'CRITICAL',
+            jira_ticket  = escalation.get('jira_ticket', 'DEMO-001') if escalation else 'DEMO-001',
+            status       = 'resolved',
+            triggered_by = current_user.username,
+            service_name = diagnosis.get('affected_service', 'ec2-instance'),
+        )
+        db.session.add(incident)
+        db.session.commit()
+        return jsonify({"success": True, "incident": incident.to_dict()})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ── API: Get Incidents (with search + filter) ─────────────────────────────────
 @app.route('/api/incidents')
 @login_required
 def get_incidents():
-    return jsonify(incidents_db)
+    query    = Incident.query
+    search   = request.args.get('search', '').strip()
+    severity = request.args.get('severity', '').strip()
+    date_from = request.args.get('date_from', '').strip()
+    date_to   = request.args.get('date_to', '').strip()
 
+    if search:
+        query = query.filter(
+            db.or_(
+                Incident.root_cause.ilike('%' + search + '%'),
+                Incident.service_name.ilike('%' + search + '%'),
+                Incident.jira_ticket.ilike('%' + search + '%'),
+            )
+        )
+    if severity:
+        query = query.filter(Incident.severity.ilike(severity))
+    if date_from:
+        query = query.filter(Incident.time >= datetime.strptime(date_from, '%Y-%m-%d'))
+    if date_to:
+        query = query.filter(Incident.time <= datetime.strptime(date_to + ' 23:59:59', '%Y-%m-%d %H:%M:%S'))
+
+    total     = Incident.query.count()
+    incidents = query.order_by(Incident.time.desc()).all()
+    return jsonify({"total": total, "incidents": [i.to_dict() for i in incidents]})
+
+# ── API: Export CSV ───────────────────────────────────────────────────────────
+@app.route('/api/export-csv')
+@login_required
+def export_csv():
+    incidents = Incident.query.order_by(Incident.time.desc()).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['ID', 'Time', 'Root Cause', 'Severity', 'Jira Ticket',
+                     'Service', 'Triggered By', 'Status'])
+    for inc in incidents:
+        writer.writerow([
+            inc.id,
+            inc.time.strftime("%Y-%m-%d %H:%M:%S"),
+            inc.root_cause,
+            inc.severity,
+            inc.jira_ticket or 'N/A',
+            inc.service_name or 'unknown',
+            inc.triggered_by or 'system',
+            inc.status,
+        ])
+    output.seek(0)
+    filename = 'incidents_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.csv'
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename=' + filename}
+    )
+
+# ── API: Status ───────────────────────────────────────────────────────────────
 @app.route('/api/status')
 @login_required
 def get_status():
-    return jsonify({"status": "running", "agents": 5, "incidents": len(incidents_db), "last_check": str(datetime.now())})
+    return jsonify({
+        "status":     "running",
+        "agents":     5,
+        "incidents":  Incident.query.count(),
+        "last_check": str(datetime.now()),
+        "db":         DATABASE_URL.split('://')[0]
+    })
 
+# ── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    print("=" * 50)
-    print("  AI DevOps Dashboard  -  With Auth + Demo Mode")
-    print("=" * 50)
+    print("=" * 55)
+    print("  AI DevOps Dashboard  -  DB + Search + CSV Export")
+    print("=" * 55)
     print("  URL      : http://localhost:5000")
     print("  Admin    : admin / admin123")
     print("  Engineer : engineer / eng123")
     print("  Viewer   : viewer / view123")
-    print("=" * 50)
+    print("  Database : " + DATABASE_URL.split('://')[0].upper())
+    print("=" * 55)
     app.run(debug=True, port=5000)

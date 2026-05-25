@@ -968,4 +968,5 @@ if __name__ == '__main__':
     print("  Engineer : engineer / eng123")
     print("  Viewer   : viewer / view123")
     print("=" * 55)
-    socketio.run(app, debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
